@@ -35,7 +35,22 @@ FINANCIAL_LABELS = [
 
 
 def load_model(model_dir: str, use_onnx: bool = False):  # type: ignore[return]
-    """Load GLiNER model from directory."""
+    """Load a GLiNER model from a local directory.
+
+    Args:
+        model_dir: Path to a GLiNER model directory containing ``config.json``
+            and tokeniser files (as produced by ``train.py`` or
+            ``export_onnx.py``).
+        use_onnx: Reserved for a future ONNX-backed evaluation path.  Currently
+            unused; the model always loads via ``GLiNER.from_pretrained()``.
+
+    Returns:
+        A loaded ``GLiNER`` instance ready for inference.
+
+    Raises:
+        Any exception raised by ``GLiNER.from_pretrained()`` (e.g. missing
+        files, incompatible checkpoint format).
+    """
     from gliner import GLiNER  # type: ignore[import]
 
     print(f"Loading model from: {model_dir} (onnx={use_onnx})")
@@ -44,7 +59,22 @@ def load_model(model_dir: str, use_onnx: bool = False):  # type: ignore[return]
 
 
 def load_test_data(max_samples: int = 500) -> list[dict[str, Any]]:
-    """Load FiNER-139 test split and convert to evaluation format."""
+    """Load the FiNER-139 test split and convert to evaluation format.
+
+    Downloads ``nlpaueb/finer-139`` (test split) from HuggingFace and converts
+    BIO-tagged token sequences to character-span format.  Falls back to
+    ``conll2003`` if FiNER-139 is unavailable.  Entity type tags are lowercased
+    without mapping to the eleven financial labels, so evaluation is label-
+    agnostic at the character-span level.
+
+    Args:
+        max_samples: Maximum number of samples with at least one entity span to
+            return.  Default 500 covers the full FiNER-139 test split.
+
+    Returns:
+        A list of dictionaries, each with ``"text"`` (str) and ``"ner"``
+        (list of ``(char_start, char_end, label)`` tuples).
+    """
     from datasets import load_dataset  # type: ignore[import]
 
     try:
@@ -108,7 +138,27 @@ def evaluate(
     labels: list[str],
     threshold: float = 0.5,
 ) -> dict[str, Any]:
-    """Entity-level evaluation."""
+    """Compute entity-level precision, recall, F1, and span counts.
+
+    Uses exact character-span matching (ignoring label): a predicted span
+    ``(start, end)`` is a true positive when a gold span with the same
+    boundaries exists.  Label accuracy is therefore not penalised — this
+    mirrors the evaluation used during training.
+
+    Args:
+        model: A loaded GLiNER model instance with a ``predict_entities``
+            method.
+        samples: A list of evaluation dictionaries, each with ``"text"`` (str)
+            and ``"ner"`` (list of ``(start, end, label)`` tuples or lists).
+        labels: Entity type labels passed to ``model.predict_entities()``.
+        threshold: Minimum confidence score for a prediction to be counted.
+
+    Returns:
+        A dictionary with keys:
+        ``"precision"`` (float), ``"recall"`` (float), ``"f1"`` (float),
+        ``"true_positives"`` (int), ``"false_positives"`` (int), and
+        ``"false_negatives"`` (int).
+    """
     y_true: list[int] = []
     y_pred: list[int] = []
     tp = fp = fn = 0
@@ -141,6 +191,13 @@ def evaluate(
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse and return command-line arguments for the evaluation script.
+
+    Returns:
+        An ``argparse.Namespace`` with attributes ``model_dir``, ``onnx``
+        (bool), ``threshold`` (float), ``max_samples`` (int), and ``output``
+        (optional str path for saving JSON results).
+    """
     p = argparse.ArgumentParser(description="Evaluate GLiNER on financial NER")
     p.add_argument("--model-dir", required=True, help="Model directory")
     p.add_argument("--onnx", action="store_true", help="Use ONNX inference")

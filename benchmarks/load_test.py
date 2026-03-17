@@ -66,13 +66,26 @@ try:
     ]
 
     class NERUser(HttpUser):
-        """Single-text prediction load test."""
+        """Locust virtual user that exercises the three main API endpoints.
+
+        Task weights mirror realistic traffic patterns: single-text predictions
+        are four times more frequent than batch calls, and health checks occur
+        at the same rate as batch calls.  The ``wait_time`` simulates a human
+        or client pausing between requests.
+        """
 
         wait_time = between(0.1, 0.5)
         _idx = 0
 
         @task(4)
         def predict_single(self) -> None:
+            """Send a single-text ``POST /predict`` request.
+
+            Cycles through ``SAMPLE_TEXTS`` in a round-robin fashion so that
+            different input lengths reach the model during the test run.
+            The task weight of 4 makes this the most frequent operation,
+            representing typical interactive use.
+            """
             text = SAMPLE_TEXTS[NERUser._idx % len(SAMPLE_TEXTS)]
             NERUser._idx += 1
             self.client.post(
@@ -87,6 +100,12 @@ try:
 
         @task(1)
         def predict_batch(self) -> None:
+            """Send a four-text ``POST /predict/batch`` request.
+
+            Uses a fixed slice of ``SAMPLE_TEXTS`` to exercise the batched
+            forward pass.  Task weight of 1 reflects lower expected frequency
+            relative to single-text predictions in production traffic.
+            """
             texts = SAMPLE_TEXTS[:4]
             self.client.post(
                 "/predict/batch",
@@ -100,6 +119,11 @@ try:
 
         @task(1)
         def health_check(self) -> None:
+            """Send a ``GET /health`` request to verify service liveness.
+
+            Included in the load test to confirm that the health endpoint
+            remains responsive and returns quickly even under inference load.
+            """
             self.client.get("/health", name="/health")
 
 except ImportError:
@@ -117,6 +141,22 @@ async def _run_single(
     results: list[float],
     errors: list[str],
 ) -> None:
+    """Send one ``POST /predict`` request and record its latency.
+
+    On success, appends the round-trip latency in milliseconds to ``results``.
+    On failure (HTTP error or network exception), appends the error string to
+    ``errors``.  Both lists are shared across concurrent coroutines; appending
+    to a Python list is thread-safe within the GIL.
+
+    Args:
+        client: An open ``httpx.AsyncClient`` instance.
+        url: Base URL of the NER service (e.g. ``"http://localhost:8000"``).
+        text: The text string to send in the request body.
+        labels: Entity labels to include in the request.
+        results: Shared list to which successful latency values (ms) are
+            appended.
+        errors: Shared list to which error strings are appended on failure.
+    """
     import httpx
 
     t0 = time.perf_counter()
@@ -137,6 +177,27 @@ async def run_benchmark(
     concurrency: int,
     total_requests: int,
 ) -> dict[str, Any]:
+    """Execute the async load test and return aggregated statistics.
+
+    Dispatches ``total_requests`` concurrent ``POST /predict`` calls using an
+    ``asyncio.Semaphore`` to cap in-flight requests at ``concurrency``.  A
+    single ``GET /health`` warmup request is sent before the test begins to
+    ensure that the service is ready and any connection pool overhead is
+    excluded from the latency measurements.
+
+    Args:
+        url: Base URL of the NER service (e.g. ``"http://localhost:8000"``).
+        concurrency: Maximum number of requests in-flight simultaneously.
+        total_requests: Total number of ``/predict`` requests to send.
+
+    Returns:
+        A dictionary containing:
+        ``"url"``, ``"concurrency"``, ``"total_requests"``, ``"successful"``
+        (int), ``"errors"`` (int), ``"error_rate_pct"`` (float),
+        ``"elapsed_seconds"`` (float), ``"throughput_rps"`` (float), and
+        ``"latency_ms"`` (dict with ``"min"``, ``"mean"``, ``"p50"``,
+        ``"p95"``, ``"p99"``, ``"max"`` keys, all in milliseconds).
+    """
     import httpx
 
     sample_texts = [
@@ -208,6 +269,12 @@ async def run_benchmark(
 
 
 def main() -> None:
+    """Entry point for the standalone async httpx benchmark runner.
+
+    Parses CLI arguments, runs the async load test via ``asyncio.run()``,
+    prints a summary to stdout, and saves the full results dictionary as a
+    JSON file to the path specified by ``--output``.
+    """
     p = argparse.ArgumentParser(description="Benchmark the NER API")
     p.add_argument("--url", default="http://localhost:8000", help="API base URL")
     p.add_argument("--concurrency", type=int, default=10, help="Concurrent clients")

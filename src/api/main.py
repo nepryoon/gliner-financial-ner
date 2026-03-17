@@ -102,6 +102,23 @@ ner_model = NERModel(model_name=_model_name, onnx_model_dir=_onnx_dir)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # type: ignore[type-arg]
+    """Manage application startup and shutdown within the ASGI lifespan.
+
+    On startup, loads the NER model (ONNX if available, otherwise PyTorch)
+    and runs the warmup sequence to pre-populate ONNX Runtime kernel caches.
+    Uvicorn does not begin accepting connections until the startup block
+    completes, guaranteeing that every request is served by a warm model.
+
+    On shutdown, logs the event.  Explicit resource cleanup (e.g. closing the
+    ORT session) may be added here in future without changing call-sites.
+
+    Args:
+        app: The FastAPI application instance (unused but required by the
+            ``asynccontextmanager`` lifespan protocol).
+
+    Yields:
+        Control to FastAPI while the application is running.
+    """
     log.info("service_startup", model=_model_name, onnx_dir=_onnx_dir)
     ner_model.load()
     ner_model.warmup()
@@ -136,6 +153,24 @@ app.add_middleware(
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next: Any) -> Response:
+    """Log every HTTP request with method, path, status code, and latency.
+
+    Runs as an ASGI middleware wrapping every inbound request.  Timing begins
+    before ``call_next`` is awaited and ends once a ``Response`` object is
+    returned, capturing the full round-trip server-side latency.
+
+    Structured context variables (``method``, ``path``, ``client``) are bound
+    at request start and automatically merged into every ``structlog`` call
+    made during that request's lifetime, including calls inside route handlers.
+
+    Args:
+        request: The incoming Starlette ``Request`` object.
+        call_next: Callable that passes the request down to the next
+            middleware or route handler and returns the response.
+
+    Returns:
+        The unmodified ``Response`` returned by the downstream handler.
+    """
     t0 = time.perf_counter()
     structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(
