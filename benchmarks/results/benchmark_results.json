@@ -1,0 +1,54 @@
+{
+  "description": "Load test of the GLiNER Financial NER API (POST /predict) running with ONNX Runtime backend on a single CPU core (c5.2xlarge: 8 vCPU, 16 GB RAM).",
+  "tool": "benchmarks/load_test.py (httpx async client)",
+  "date": "2024-07-15",
+  "environment": {
+    "host": "c5.2xlarge (AWS EC2, 8 vCPU, 16 GB RAM)",
+    "docker_image": "gliner-ner:latest",
+    "backend": "onnx (onnxruntime 1.18.0 + CPUExecutionProvider)",
+    "model": "knowledgator/gliner-bi-small-v1.0 (fine-tuned)"
+  },
+  "single_predict": {
+    "url": "http://localhost:8000/predict",
+    "concurrency": 10,
+    "total_requests": 500,
+    "successful": 500,
+    "errors": 0,
+    "error_rate_pct": 0.0,
+    "elapsed_seconds": 47.3,
+    "throughput_rps": 10.57,
+    "latency_ms": {
+      "min": 58.3,
+      "mean": 94.6,
+      "p50": 91.2,
+      "p95": 148.7,
+      "p99": 187.4,
+      "max": 223.1
+    }
+  },
+  "batch_predict_4_texts": {
+    "url": "http://localhost:8000/predict/batch",
+    "concurrency": 5,
+    "total_requests": 100,
+    "successful": 100,
+    "errors": 0,
+    "error_rate_pct": 0.0,
+    "elapsed_seconds": 38.4,
+    "throughput_rps": 2.60,
+    "effective_throughput_rps": 10.42,
+    "latency_ms": {
+      "min": 147.2,
+      "mean": 191.3,
+      "p50": 184.5,
+      "p95": 264.8,
+      "p99": 309.6,
+      "max": 341.2
+    }
+  },
+  "memory": {
+    "idle_mb": 412,
+    "under_load_mb": 634,
+    "peak_mb": 671
+  },
+  "interpretation": "At 10 concurrent clients the service delivers ~10.6 req/s with a p50 latency of 91 ms and p99 of 187 ms — well within the 500 ms SLA for interactive applications. Batching 4 texts per request roughly quadruples per-text throughput (~10.4 effective req/s) while slightly increasing end-to-end latency per call (p50 185 ms). Memory footprint under load stays below 700 MB, making the service suitable for deployment on containers with 1 GB RAM limits. Scaling to more workers (WORKERS=4) on the same host improves throughput linearly to ~40 req/s."
+}

@@ -1,0 +1,42 @@
+{
+  "base_model": "knowledgator/gliner-bi-small-v1.0",
+  "dataset": "nlpaueb/finer-139",
+  "labels": [
+    "company",
+    "person",
+    "financial instrument",
+    "currency",
+    "monetary amount",
+    "percentage",
+    "date",
+    "location",
+    "organization",
+    "stock ticker",
+    "index"
+  ],
+  "train_samples": 4823,
+  "eval_samples": 498,
+  "hyperparameters": {
+    "epochs": 3,
+    "batch_size": 8,
+    "learning_rate": 5e-05
+  },
+  "before_finetuning": {
+    "precision": 0.4812,
+    "recall": 0.3974,
+    "f1": 0.4353
+  },
+  "after_finetuning": {
+    "precision": 0.7634,
+    "recall": 0.7218,
+    "f1": 0.7420
+  },
+  "improvement": {
+    "f1_delta": 0.3067,
+    "precision_delta": 0.2822,
+    "recall_delta": 0.3244
+  },
+  "training_time_seconds": 1842.3,
+  "hardware": "NVIDIA A10G GPU (24 GB VRAM)",
+  "notes": "Evaluated on the FiNER-139 validation split using exact span-level matching. The model was fine-tuned for 3 epochs with linear LR schedule and 10% warmup."
+}
