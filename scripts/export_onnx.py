@@ -25,7 +25,39 @@ import torch
 
 
 def export_onnx(model_dir: str, output_dir: str, opset: int = 14) -> None:
-    """Export GLiNER model to ONNX format."""
+    """Export a fine-tuned GLiNER model's transformer backbone to ONNX format.
+
+    Performs the following steps:
+
+    1. Loads the GLiNER model from ``model_dir`` (including the tokeniser).
+    2. Copies the tokeniser files and ``config.json`` to ``output_dir`` so that
+       the inference service can load the full GLiNER instance from a single
+       directory.
+    3. Exports the DeBERTa encoder (``model.model``) to an ONNX file with
+       dynamic ``batch`` and ``seq_len`` axes, enabling the session to accept
+       inputs of any length at runtime.
+    4. Verifies the ONNX output using ONNX Runtime with a dummy forward pass.
+    5. Writes ``export_meta.json`` recording the opset version, file size, and
+       verification status.
+
+    The exported ``model.onnx`` file contains only the transformer encoder
+    backbone, not the GLiNER span classification head.  At inference time,
+    GLiNER still manages tokenisation and span scoring; only the encoder
+    forward pass is intended to be replaced by the ORT session.
+
+    Args:
+        model_dir: Path to the fine-tuned GLiNER model directory (as produced
+            by ``scripts/train.py``).
+        output_dir: Destination directory for ONNX artefacts.  Created if it
+            does not exist.
+        opset: ONNX opset version to target.  Default 14 supports all DeBERTa
+            operators and is compatible with ONNX Runtime ≥ 1.14.
+
+    Raises:
+        FileNotFoundError: If ``model_dir`` does not contain a valid GLiNER
+            checkpoint.
+        RuntimeError: If ONNX Runtime fails to verify the exported model.
+    """
     from gliner import GLiNER  # type: ignore[import]
 
     print(f"Loading GLiNER model from: {model_dir}")
@@ -130,6 +162,12 @@ def export_onnx(model_dir: str, output_dir: str, opset: int = 14) -> None:
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse and return command-line arguments for the ONNX export script.
+
+    Returns:
+        An ``argparse.Namespace`` with attributes ``model_dir``, ``output_dir``,
+        and ``opset``.
+    """
     p = argparse.ArgumentParser(description="Export fine-tuned GLiNER to ONNX")
     p.add_argument(
         "--model-dir",
