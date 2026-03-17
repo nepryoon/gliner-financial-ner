@@ -1,0 +1,10 @@
+# Training dependencies (includes runtime deps)
+-r requirements.txt
+
+# Fine-tuning
+torch>=2.2.0
+transformers>=4.40.0
+datasets>=2.19.0
+seqeval>=1.2.2
+scikit-learn>=1.4.0
+accelerate>=0.29.0

@@ -1,0 +1,26 @@
+services:
+  ner-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: gliner-ner:latest
+    container_name: gliner-ner-api
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      - MODEL_NAME=${MODEL_NAME:-knowledgator/gliner-bi-small-v1.0}
+      - ONNX_MODEL_DIR=${ONNX_MODEL_DIR:-/app/model_onnx}
+      - PORT=8000
+      - WORKERS=${WORKERS:-1}
+    volumes:
+      # Mount ONNX model directory so it can be updated without rebuilding
+      - ./model_onnx:/app/model_onnx:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    mem_limit: 2g
+    cpus: "2.0"
