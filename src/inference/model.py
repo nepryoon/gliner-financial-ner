@@ -24,11 +24,10 @@ class NERModel:
 
     1. **ONNX** (``backend = "onnx"``) — ``model_onnx/model.onnx`` is found
        and ``onnxruntime`` can create an ``InferenceSession``.  The ORT session
-       is stored in ``self._ort_session`` for future wiring into the prediction
-       path.  Inference currently still routes through GLiNER's native
-       ``predict_entities()`` (PyTorch); the ORT session is initialised and
-       verified at startup but is not yet substituted for the encoder forward
-       pass (see the Known Limitations section in the README).
+       is stored in ``self._ort_session`` and the DeBERTa encoder's ``forward``
+       method is monkey-patched on the loaded GLiNER instance so that every
+       call to ``predict_entities()`` routes the encoder forward pass through
+       ONNX Runtime instead of the PyTorch kernel.
 
     2. **PyTorch from ONNX directory** (``backend = "pytorch_from_onnx_dir"``)
        — ``model_onnx/model.onnx`` is found but ``onnxruntime`` is unavailable
@@ -104,7 +103,9 @@ class NERModel:
         contain ``config.json`` and tokeniser files) and separately creates an
         ``onnxruntime.InferenceSession`` with all graph optimisations enabled.
 
-        The ORT session is stored in ``self._ort_session`` for future use.
+        The ORT session is stored in ``self._ort_session`` and the encoder's
+        ``forward`` method is monkey-patched on the GLiNER instance so that
+        all subsequent inference calls route through the ORT session.
         If ``onnxruntime`` is not importable or the session creation raises,
         the method still returns ``True`` and sets the backend to
         ``"pytorch_from_onnx_dir"`` so that GLiNER can serve requests via
@@ -138,7 +139,10 @@ class NERModel:
                 max_neg_type_ratio=1,
             )
             try:
+                import numpy as np  # type: ignore[import]
                 import onnxruntime as ort  # type: ignore[import]
+                import torch  # type: ignore[import]
+                from transformers.modeling_outputs import BaseModelOutput  # type: ignore[import]
 
                 sess_options = ort.SessionOptions()
                 sess_options.graph_optimization_level = (
@@ -149,6 +153,77 @@ class NERModel:
                     sess_options=sess_options,
                     providers=["CPUExecutionProvider"],
                 )
+
+                # ----------------------------------------------------------
+                # Monkey-patch: wire the ORT session into GLiNER's encoder
+                # forward pass so that every call to predict_entities() (and
+                # batch_predict_entities()) routes through ONNX Runtime
+                # instead of the PyTorch encoder.
+                #
+                # Why monkey-patch rather than subclassing?
+                #   Subclassing GLiNER would require replicating or overriding
+                #   a large portion of the class hierarchy (GLiNER →
+                #   SpanClassifier → encoder backbone) without a stable public
+                #   extension point.  A targeted instance-level patch is
+                #   simpler, fully reversible, and does not touch GLiNER's
+                #   source code.  The patch is applied to the specific
+                #   ``self._model.model`` encoder *instance* only, so it has
+                #   no effect on any other GLiNER object in the same process.
+                #
+                # What the patch does:
+                #   ``self._model.model`` is the DeBERTa-v3-small transformer
+                #   backbone (an ``nn.Module``).  GLiNER's span-scoring head
+                #   calls ``self.model(input_ids, attention_mask)`` which
+                #   ultimately invokes ``self.model.forward(input_ids,
+                #   attention_mask)``.  By replacing ``.forward`` on the
+                #   encoder *instance* (not the class), Python's descriptor
+                #   protocol returns the plain function without auto-binding
+                #   ``self``, so the call signature received by our closure is
+                #   exactly ``(input_ids, attention_mask, **kwargs)``.
+                #
+                # Inputs the ORT session receives:
+                #   • ``input_ids``      — int64 numpy array [batch, seq_len]
+                #   • ``attention_mask`` — int64 numpy array [batch, seq_len]
+                #
+                # Output the ORT session returns:
+                #   A single numpy float32 array ``last_hidden_state`` with
+                #   shape [batch, seq_len, hidden_dim] (768 for bi-small).
+                #
+                # How the output is converted back:
+                #   ``torch.from_numpy()`` wraps the numpy array as a CPU
+                #   tensor (zero-copy).  The tensor is then packaged into a
+                #   ``transformers.modeling_outputs.BaseModelOutput`` so that
+                #   GLiNER's span head can access it via the standard
+                #   ``.last_hidden_state`` attribute — the same interface it
+                #   uses with the native PyTorch encoder.
+                # ----------------------------------------------------------
+                _ort_session = self._ort_session
+
+                def _ort_forward(input_ids, attention_mask=None, **kwargs):
+                    """Delegate encoder forward pass to the ORT session."""
+                    ids_np = input_ids.detach().cpu().numpy().astype(np.int64)
+                    mask_np = (
+                        attention_mask.detach().cpu().numpy().astype(np.int64)
+                        if attention_mask is not None
+                        else np.ones_like(ids_np)
+                    )
+                    # ``_ort_session.run`` returns a list; the first (and only)
+                    # element is last_hidden_state as a float32 numpy array.
+                    [hidden_np] = _ort_session.run(
+                        ["last_hidden_state"],
+                        {"input_ids": ids_np, "attention_mask": mask_np},
+                    )
+                    # Wrap in BaseModelOutput so GLiNER's span head can access
+                    # ``.last_hidden_state`` in the same way as the PyTorch path.
+                    return BaseModelOutput(
+                        last_hidden_state=torch.from_numpy(hidden_np)
+                    )
+
+                # Replace the encoder's forward method on this instance only.
+                # nn.Module stores instance attributes in __dict__ separately
+                # from class attributes, so this does not affect the class.
+                self._model.model.forward = _ort_forward
+
                 self._backend = "onnx"
                 logger.info("onnx_model_loaded", path=onnx_path)
                 return True
@@ -393,7 +468,8 @@ class NERModel:
 
         Possible values:
 
-        * ``"onnx"`` — ONNX Runtime session created from ``model.onnx``.
+        * ``"onnx"`` — ONNX Runtime session created from ``model.onnx``; the
+          encoder forward pass is monkey-patched to route through ORT.
         * ``"pytorch_from_onnx_dir"`` — GLiNER loaded from the ONNX artefact
           directory but ORT session creation failed; inference via PyTorch.
         * ``"pytorch"`` — Model loaded from HuggingFace; no ONNX artefacts

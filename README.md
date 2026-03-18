@@ -217,11 +217,19 @@ The export uses opset 14, which supports all DeBERTa operators and is widely sup
 
 ### ONNX loading strategy in `NERModel`
 
-**What:** `_try_load_onnx()` loads the GLiNER model from the `model_onnx/` directory via `GLiNER.from_pretrained()` (which reads PyTorch weights from that directory) and separately initialises an `onnxruntime.InferenceSession`. The ORT session is stored in `self._ort_session`. Inference still routes through GLiNER's native `predict_entities()` method.
+**What:** `_try_load_onnx()` loads the GLiNER model from the `model_onnx/` directory via `GLiNER.from_pretrained()` (which reads the tokeniser and config from that directory) and separately initialises an `onnxruntime.InferenceSession` from `model_onnx/model.onnx`. Once both are ready, the encoder's `forward` method is monkey-patched on the loaded GLiNER **instance** so that every subsequent call to `predict_entities()` or `batch_predict_entities()` routes the encoder forward pass through ONNX Runtime instead of the PyTorch kernel.
+
+**Why monkey-patch rather than subclassing:** Subclassing GLiNER would require replicating or overriding a large portion of the class hierarchy (GLiNER → SpanClassifier → encoder backbone) without a stable public extension point. A targeted instance-level patch is simpler, fully reversible, and does not modify GLiNER's source code. The patch is applied to `self._model.model` (the DeBERTa backbone instance) only, so it has no effect on any other GLiNER object in the same process.
+
+**What the monkey-patch does at the code level:** The closure `_ort_forward(input_ids, attention_mask=None, **kwargs)` is assigned to `self._model.model.forward` on the encoder instance. Because Python's descriptor protocol only auto-binds functions found on the *class*, an attribute set on an *instance* is returned as a plain callable without prepending `self` — giving the closure exactly the `(input_ids, attention_mask)` signature that GLiNER's span head passes.
+
+**Inputs the ORT session receives:**
+- `input_ids` — int64 NumPy array of shape `[batch, seq_len]` (detached from any autograd graph, moved to CPU).
+- `attention_mask` — int64 NumPy array of the same shape; defaults to an all-ones array if not provided.
+
+**Output the ORT session returns and how it is converted back:** The session returns a single float32 NumPy array `last_hidden_state` of shape `[batch, seq_len, hidden_dim]` (768 for bi-small). `torch.from_numpy()` wraps it as a zero-copy CPU tensor. The tensor is then packaged into a `transformers.modeling_outputs.BaseModelOutput` — the same type returned by the native PyTorch encoder — so GLiNER's span-scoring head can access it via the standard `.last_hidden_state` attribute without any further modification.
 
 **What problem it solves:** The `model_onnx/` directory is the single source of truth for both the tokeniser/config (consumed by GLiNER) and the ONNX weights (consumed by ORT). Keeping them co-located eliminates the need to track two separate directories at deployment time.
-
-**Current limitation:** The `_ort_session` is initialised and verified at startup but is not yet wired into the prediction path. GLiNER's `predict_entities()` still executes the PyTorch encoder. The intent is to replace the encoder forward pass with the ORT session (see [§8 Known Limitations](#8-known-limitations--future-work)).
 
 **Fallback chain:** If `model.onnx` is not found, the model loads from `model_onnx/` using PyTorch (backend `pytorch_from_onnx_dir`). If that directory does not exist, it loads the base model from HuggingFace (backend `pytorch`).
 
@@ -597,10 +605,6 @@ Full raw results: [`benchmarks/results/benchmark_results.json`](benchmarks/resul
 ---
 
 ## 8. Known Limitations & Future Work
-
-### ORT session not wired into inference
-
-The most significant gap between the stated design and the current implementation: `_try_load_onnx()` initialises an `onnxruntime.InferenceSession` and stores it in `self._ort_session`, but all inference routes through GLiNER's native `predict_entities()` method, which executes the PyTorch encoder. The backend is reported as `"onnx"` when the session is created, which is misleading. The next step is to monkey-patch or subclass GLiNER's encoder module so that its forward pass delegates to `self._ort_session.run()`.
 
 ### No INT8 quantisation
 
